@@ -1,6 +1,7 @@
 """
-家长端数据查询 API
+家长/学生端数据查询 API v3
 所有接口强制通过 get_current_parent 依赖，数据严格隔离至当前学生
+课程记录已改为 LessonRecord（单节课粒度）
 """
 
 from typing import List, Optional
@@ -8,8 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Parent, Student, CourseSession, StudentPerformance, ExamRecord, HomeworkAssignment, HomeworkCompletion
-from schemas import StudentResponse, CourseSessionResponse, ExamRecordResponse, HomeworkAssignmentResponse
+from models import Parent, Student, Class, LessonRecord, LessonPerformance, ExamRecord, HomeworkAssignment, HomeworkCompletion
+from schemas import StudentResponse, LessonRecordResponse, ExamRecordResponse, HomeworkAssignmentResponse
 from api.deps import get_current_parent
 
 router = APIRouter(prefix="/parent", tags=["parent"])
@@ -20,100 +21,79 @@ def get_my_student(
     current_parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
-    """获取当前家长绑定的学生信息"""
+    """获取当前家长/学生绑定的学生信息"""
     return current_parent.student
 
 
-@router.get("/performance", response_model=List[CourseSessionResponse])
+@router.get("/performance", response_model=List[LessonRecordResponse])
 def get_performance(
-    week: Optional[str] = None,
     subject: Optional[str] = None,
-    record_type: Optional[str] = None,
     current_parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
     """
-    获取孩子的课程表现记录
-    返回 CourseSession 列表，每条记录中 performances 仅含当前学生
+    获取孩子的课程表现记录（单节课粒度）
+    返回 LessonRecord 列表，每条记录中 performances 仅含当前学生
     """
     student_id = current_parent.student_id
 
-    # 找到包含该学生反馈的课程单元
-    q = db.query(CourseSession).join(
-        StudentPerformance,
-        StudentPerformance.course_session_id == CourseSession.id
-    ).filter(StudentPerformance.student_id == student_id)
+    q = (db.query(LessonRecord)
+         .join(LessonPerformance, LessonPerformance.lesson_record_id == LessonRecord.id)
+         .filter(LessonPerformance.student_id == student_id))
 
-    if week:
-        q = q.filter(CourseSession.week == week)
     if subject:
-        q = q.filter(CourseSession.subject == subject)
-    if record_type:
-        q = q.filter(CourseSession.record_type == record_type)
+        q = q.join(Class, LessonRecord.class_id == Class.id).filter(Class.subject == subject)
 
-    sessions = q.order_by(CourseSession.date.desc().nullslast()).all()
+    lessons = q.order_by(LessonRecord.lesson_date.desc()).all()
 
-    # 只保留当前学生的 performance 记录
     result = []
-    for session in sessions:
-        session.performances = [
-            p for p in session.performances if p.student_id == student_id
-        ]
-        result.append(session)
-
+    for lesson in lessons:
+        lesson.performances = [p for p in lesson.performances if p.student_id == student_id]
+        result.append(lesson)
     return result
 
 
 @router.get("/exams", response_model=List[ExamRecordResponse])
 def get_exams(
     subject: Optional[str] = None,
-    week: Optional[str] = None,
     limit: int = 20,
     current_parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
     """获取孩子的考试成绩记录"""
     student_id = current_parent.student_id
-
     q = db.query(ExamRecord).filter(ExamRecord.student_id == student_id)
     if subject:
         q = q.filter(ExamRecord.subject == subject)
-    if week:
-        q = q.filter(ExamRecord.week == week)
-
     return q.order_by(ExamRecord.test_date.desc().nullslast()).limit(limit).all()
 
 
 @router.get("/homework", response_model=List[HomeworkAssignmentResponse])
 def get_homework(
-    week: Optional[str] = None,
     subject: Optional[str] = None,
     current_parent: Parent = Depends(get_current_parent),
     db: Session = Depends(get_db),
 ):
     """
     获取孩子的作业记录
-    返回 HomeworkAssignment 列表，每条记录中 completions 仅含当前学生
+    从班级维度的 HomeworkAssignment 中筛选该学生的完成情况
     """
     student_id = current_parent.student_id
+    student    = db.query(Student).filter(Student.id == student_id).first()
 
-    q = db.query(HomeworkAssignment).join(
-        HomeworkCompletion,
-        HomeworkCompletion.homework_assignment_id == HomeworkAssignment.id
-    ).filter(HomeworkCompletion.student_id == student_id)
-
-    if week:
-        q = q.filter(HomeworkAssignment.week == week)
+    q = (db.query(HomeworkAssignment)
+         .join(HomeworkCompletion, HomeworkCompletion.homework_assignment_id == HomeworkAssignment.id)
+         .filter(
+             HomeworkCompletion.student_id == student_id,
+             HomeworkAssignment.class_id   == student.class_id,
+         ))
     if subject:
         q = q.filter(HomeworkAssignment.subject == subject)
 
-    assignments = q.order_by(HomeworkAssignment.date.desc().nullslast()).all()
+    assignments = q.order_by(HomeworkAssignment.date.desc()).all()
 
     result = []
     for assignment in assignments:
-        assignment.completions = [
-            c for c in assignment.completions if c.student_id == student_id
-        ]
+        assignment.completions = [c for c in assignment.completions if c.student_id == student_id]
         result.append(assignment)
-
     return result

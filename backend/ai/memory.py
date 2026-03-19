@@ -12,10 +12,8 @@ from openai import AsyncOpenAI
 
 from models import ConversationMemory
 
-client = AsyncOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-)
+_api_key = os.getenv("DEEPSEEK_API_KEY")
+client = AsyncOpenAI(api_key=_api_key, base_url="https://api.deepseek.com") if _api_key else None
 
 MEMORY_MODEL = "deepseek-chat"
 
@@ -93,6 +91,9 @@ async def extract_and_update_memory(
 {{"concerns": [...], "child_traits": [...], "preferences": [...]}}"""
 
     try:
+        if client is None:
+            print("[memory] DEEPSEEK_API_KEY 未配置，跳过记忆更新")
+            return
         response = await client.chat.completions.create(
             model=MEMORY_MODEL,
             messages=[{"role": "user", "content": prompt}],

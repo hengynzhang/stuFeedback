@@ -1,43 +1,52 @@
 """
-Pydantic 数据校验模型
-分为：Auth / Teacher / Parent / Chat 四组
+Pydantic 数据校验模型 v3
+分组：Teacher Auth / Class / Student / LessonRecord / ExamRecord / Homework / Parent Auth / Chat
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import date, datetime
+import re
 
 
 # ─────────────────────────────────────────────
-# Auth
+# 教师认证
 # ─────────────────────────────────────────────
 
-class LoginRequest(BaseModel):
-    student_id: str  # 8位学号
+class SendCodeRequest(BaseModel):
+    phone: str
 
-class LoginResponse(BaseModel):
-    session_token: str
-    student_name: str
-    student_id: str
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: str) -> str:
+        if not re.match(r"^1[3-9]\d{9}$", v):
+            raise ValueError("手机号格式不正确")
+        return v
 
+class SendCodeResponse(BaseModel):
+    message: str
+    code: Optional[str] = None   # Mock 模式下返回，生产环境去掉
 
-# ─────────────────────────────────────────────
-# Student
-# ─────────────────────────────────────────────
+class RegisterRequest(BaseModel):
+    phone: str
+    code: str
+    name: str
+    password: str
 
-class StudentCreate(BaseModel):
-    chinese_name: str
-    english_name: Optional[str] = None
+class TeacherLoginRequest(BaseModel):
+    phone: str
+    password: str
 
-class StudentUpdate(BaseModel):
-    chinese_name: Optional[str] = None
-    english_name: Optional[str] = None
+class TeacherLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    teacher_id: int
+    name: str
 
-class StudentResponse(BaseModel):
+class TeacherResponse(BaseModel):
     id: int
-    student_id: str
-    chinese_name: str
-    english_name: Optional[str]
+    phone: str
+    name: str
     created_at: datetime
 
     class Config:
@@ -45,19 +54,82 @@ class StudentResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# CourseSession + StudentPerformance
+# 班级
 # ─────────────────────────────────────────────
 
-class StudentPerformanceCreate(BaseModel):
+class ClassCreate(BaseModel):
+    name: str
+    subject: str
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    total_lessons: int = 0
+
+class ClassUpdate(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    total_lessons: Optional[int] = None
+    status: Optional[str] = None
+
+class ClassResponse(BaseModel):
+    id: int
+    name: str
+    subject: str
+    teacher_id: int
+    start_date: Optional[date]
+    end_date: Optional[date]
+    total_lessons: int
+    status: str
+    completed_lessons: int = 0   # 计算字段：已上课时
+    remaining_lessons: int = 0   # 计算字段：剩余课时
+    student_count: int = 0        # 计算字段：在班学员数
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ─────────────────────────────────────────────
+# 学生
+# ─────────────────────────────────────────────
+
+class StudentCreate(BaseModel):
+    chinese_name: str
+    english_name: Optional[str] = None
+    class_id: int
+
+class StudentUpdate(BaseModel):
+    chinese_name: Optional[str] = None
+    english_name: Optional[str] = None
+    class_id: Optional[int] = None
+
+class StudentResponse(BaseModel):
+    id: int
+    student_id: str
+    chinese_name: str
+    english_name: Optional[str]
+    class_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ─────────────────────────────────────────────
+# 课程记录（单节课）
+# ─────────────────────────────────────────────
+
+class LessonPerformanceCreate(BaseModel):
     student_id: int
     feedback: Optional[str] = None
 
-class StudentPerformanceUpdate(BaseModel):
+class LessonPerformanceUpdate(BaseModel):
     feedback: Optional[str] = None
 
-class StudentPerformanceResponse(BaseModel):
+class LessonPerformanceResponse(BaseModel):
     id: int
-    course_session_id: int
+    lesson_record_id: int
     student_id: int
     feedback: Optional[str]
     updated_at: datetime
@@ -65,34 +137,34 @@ class StudentPerformanceResponse(BaseModel):
     class Config:
         from_attributes = True
 
-class CourseSessionCreate(BaseModel):
-    record_type: str = "daily"           # 'daily' | 'weekly'
-    date: Optional[date] = None          # 日录入时必填
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None           # 两种粒度都应填写
-    subject: str
-    teacher_name: Optional[str] = None
-    course_content: Optional[str] = None
-    performances: List[StudentPerformanceCreate] = []
+class LessonRecordCreate(BaseModel):
+    class_id: int
+    lesson_date: date
+    lesson_start_time: Optional[str] = None   # "14:00"
+    lesson_end_time: Optional[str] = None     # "16:00"
+    topic: Optional[str] = None
+    content_notes: Optional[str] = None
+    status: str = "completed"
+    performances: List[LessonPerformanceCreate] = []
 
-class CourseSessionUpdate(BaseModel):
-    date: Optional[date] = None
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None
-    subject: Optional[str] = None
-    teacher_name: Optional[str] = None
-    course_content: Optional[str] = None
+class LessonRecordUpdate(BaseModel):
+    lesson_date: Optional[date] = None
+    lesson_start_time: Optional[str] = None
+    lesson_end_time: Optional[str] = None
+    topic: Optional[str] = None
+    content_notes: Optional[str] = None
+    status: Optional[str] = None
 
-class CourseSessionResponse(BaseModel):
+class LessonRecordResponse(BaseModel):
     id: int
-    record_type: str
-    date: Optional[date]
-    day_of_week: Optional[str]
-    week: Optional[str]
-    subject: str
-    teacher_name: Optional[str]
-    course_content: Optional[str]
-    performances: List[StudentPerformanceResponse] = []
+    class_id: int
+    lesson_date: date
+    lesson_start_time: Optional[str]
+    lesson_end_time: Optional[str]
+    topic: Optional[str]
+    content_notes: Optional[str]
+    status: str
+    performances: List[LessonPerformanceResponse] = []
     created_at: datetime
 
     class Config:
@@ -100,14 +172,12 @@ class CourseSessionResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# ExamRecord
+# 考试记录
 # ─────────────────────────────────────────────
 
 class ExamRecordCreate(BaseModel):
     student_id: int
     test_date: Optional[date] = None
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None
     test_number: Optional[int] = None
     subject: str
     score: Optional[float] = None
@@ -116,8 +186,6 @@ class ExamRecordCreate(BaseModel):
 
 class ExamRecordUpdate(BaseModel):
     test_date: Optional[date] = None
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None
     test_number: Optional[int] = None
     subject: Optional[str] = None
     score: Optional[float] = None
@@ -128,8 +196,6 @@ class ExamRecordResponse(BaseModel):
     id: int
     student_id: int
     test_date: Optional[date]
-    day_of_week: Optional[str]
-    week: Optional[str]
     test_number: Optional[int]
     subject: str
     score: Optional[float]
@@ -142,12 +208,12 @@ class ExamRecordResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# HomeworkAssignment + HomeworkCompletion
+# 作业（班级维度布置，学生维度完成）
 # ─────────────────────────────────────────────
 
 class HomeworkCompletionCreate(BaseModel):
     student_id: int
-    completion_status: str = "not_completed"  # completed / partial / not_completed
+    completion_status: str = "not_completed"
 
 class HomeworkCompletionUpdate(BaseModel):
     completion_status: str
@@ -163,27 +229,21 @@ class HomeworkCompletionResponse(BaseModel):
         from_attributes = True
 
 class HomeworkAssignmentCreate(BaseModel):
-    record_type: str = "daily"           # 'daily' | 'weekly'
-    date: Optional[date] = None
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None
+    class_id: int
+    date: date
     subject: str
     homework: Optional[str] = None
     completions: List[HomeworkCompletionCreate] = []
 
 class HomeworkAssignmentUpdate(BaseModel):
     date: Optional[date] = None
-    day_of_week: Optional[str] = None
-    week: Optional[str] = None
     subject: Optional[str] = None
     homework: Optional[str] = None
 
 class HomeworkAssignmentResponse(BaseModel):
     id: int
-    record_type: str
-    date: Optional[date]
-    day_of_week: Optional[str]
-    week: Optional[str]
+    class_id: int
+    date: date
     subject: str
     homework: Optional[str]
     completions: List[HomeworkCompletionResponse] = []
@@ -194,7 +254,20 @@ class HomeworkAssignmentResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────
-# Chat
+# 家长/学生端认证
+# ─────────────────────────────────────────────
+
+class ParentLoginRequest(BaseModel):
+    student_id: str   # 8 位学号
+
+class ParentLoginResponse(BaseModel):
+    session_token: str
+    student_name: str
+    student_id: str
+
+
+# ─────────────────────────────────────────────
+# Chat（家长/学生端）
 # ─────────────────────────────────────────────
 
 class MessageCreate(BaseModel):
@@ -218,6 +291,24 @@ class ConversationResponse(BaseModel):
         from_attributes = True
 
 class ChatResponse(BaseModel):
+    message_id: int
+    content: str
+    conversation_id: int
+
+
+# ─────────────────────────────────────────────
+# Chat（教师端）
+# ─────────────────────────────────────────────
+
+class TeacherConversationResponse(BaseModel):
+    id: int
+    created_at: datetime
+    messages: List[MessageResponse] = []
+
+    class Config:
+        from_attributes = True
+
+class TeacherChatResponse(BaseModel):
     message_id: int
     content: str
     conversation_id: int

@@ -1,6 +1,7 @@
 /**
- * API 客户端
- * 统一管理后端请求，自动附加 Authorization header（家长端）
+ * API 客户端 v3
+ * - 教师端：JWT Bearer token（localStorage: teacher_token）
+ * - 家长/学生端：session_token（localStorage: session_token）
  */
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
@@ -28,32 +29,55 @@ async function request<T>(
 
 // ── 类型定义 ────────────────────────────────────────────────
 
+export interface Teacher {
+  id: number;
+  phone: string;
+  name: string;
+  created_at: string;
+}
+
+export interface Class {
+  id: number;
+  name: string;
+  subject: string;
+  teacher_id: number;
+  start_date?: string;
+  end_date?: string;
+  total_lessons: number;
+  status: "active" | "completed";
+  completed_lessons: number;
+  remaining_lessons: number;
+  student_count: number;
+  created_at: string;
+}
+
 export interface Student {
   id: number;
   student_id: string;
   chinese_name: string;
   english_name?: string;
+  class_id: number;
   created_at: string;
 }
 
-export interface StudentPerformance {
+export interface LessonPerformance {
   id: number;
-  course_session_id: number;
+  lesson_record_id: number;
   student_id: number;
   feedback?: string;
   updated_at: string;
 }
 
-export interface CourseSession {
+export interface LessonRecord {
   id: number;
-  record_type: "daily" | "weekly";
-  date?: string;
-  day_of_week?: string;
-  week?: string;
-  subject: string;
-  teacher_name?: string;
-  course_content?: string;
-  performances: StudentPerformance[];
+  class_id: number;
+  lesson_date: string;
+  lesson_start_time?: string;
+  lesson_end_time?: string;
+  topic?: string;
+  content_notes?: string;
+  status: "completed" | "cancelled" | "makeup";
+  performances: LessonPerformance[];
   created_at: string;
 }
 
@@ -61,8 +85,6 @@ export interface ExamRecord {
   id: number;
   student_id: number;
   test_date?: string;
-  day_of_week?: string;
-  week?: string;
   test_number?: number;
   subject: string;
   score?: number;
@@ -81,10 +103,8 @@ export interface HomeworkCompletion {
 
 export interface HomeworkAssignment {
   id: number;
-  record_type: "daily" | "weekly";
-  date?: string;
-  day_of_week?: string;
-  week?: string;
+  class_id: number;
+  date: string;
   subject: string;
   homework?: string;
   completions: HomeworkCompletion[];
@@ -104,66 +124,105 @@ export interface Conversation {
   messages: Message[];
 }
 
+// ── 教师认证 API ─────────────────────────────────────────────
+
+export const teacherAuthApi = {
+  sendCode: (phone: string) =>
+    request<{ message: string; code?: string }>("/auth/teacher/send-code", {
+      method: "POST",
+      body: JSON.stringify({ phone }),
+    }),
+
+  register: (data: { phone: string; code: string; name: string; password: string }) =>
+    request<{ access_token: string; token_type: string; teacher_id: number; name: string }>(
+      "/auth/teacher/register",
+      { method: "POST", body: JSON.stringify(data) }
+    ),
+
+  login: (phone: string, password: string) =>
+    request<{ access_token: string; token_type: string; teacher_id: number; name: string }>(
+      "/auth/teacher/login",
+      { method: "POST", body: JSON.stringify({ phone, password }) }
+    ),
+};
+
 // ── 教师端 API ─────────────────────────────────────────────
 
 export const teacherApi = {
+  // 班级
+  getClasses: (token: string) =>
+    request<Class[]>("/teacher/classes", {}, token),
+  createClass: (token: string, data: Partial<Class>) =>
+    request<Class>("/teacher/classes", { method: "POST", body: JSON.stringify(data) }, token),
+  updateClass: (token: string, id: number, data: Partial<Class>) =>
+    request<Class>(`/teacher/classes/${id}`, { method: "PUT", body: JSON.stringify(data) }, token),
+  deleteClass: (token: string, id: number) =>
+    request(`/teacher/classes/${id}`, { method: "DELETE" }, token),
+
   // 学生
-  getStudents: () => request<Student[]>("/teacher/students"),
-  createStudent: (data: { chinese_name: string; english_name?: string }) =>
-    request<Student>("/teacher/students", { method: "POST", body: JSON.stringify(data) }),
-  updateStudent: (id: number, data: { chinese_name?: string; english_name?: string }) =>
-    request<Student>(`/teacher/students/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteStudent: (id: number) =>
-    request(`/teacher/students/${id}`, { method: "DELETE" }),
+  getStudents: (token: string, params?: { class_id?: number }) => {
+    const q = new URLSearchParams(params as Record<string, string>).toString();
+    return request<Student[]>(`/teacher/students${q ? `?${q}` : ""}`, {}, token);
+  },
+  createStudent: (token: string, data: { chinese_name: string; english_name?: string; class_id: number }) =>
+    request<Student>("/teacher/students", { method: "POST", body: JSON.stringify(data) }, token),
+  updateStudent: (token: string, id: number, data: Partial<Student>) =>
+    request<Student>(`/teacher/students/${id}`, { method: "PUT", body: JSON.stringify(data) }, token),
+  deleteStudent: (token: string, id: number) =>
+    request(`/teacher/students/${id}`, { method: "DELETE" }, token),
 
   // 课程记录
-  getSessions: (params?: { week?: string; subject?: string; record_type?: string }) => {
+  getLessons: (token: string, params?: { class_id?: number }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
-    return request<CourseSession[]>(`/teacher/sessions${q ? `?${q}` : ""}`);
+    return request<LessonRecord[]>(`/teacher/lessons${q ? `?${q}` : ""}`, {}, token);
   },
-  createSession: (data: Partial<CourseSession> & { performances: { student_id: number; feedback?: string }[] }) =>
-    request<CourseSession>("/teacher/sessions", { method: "POST", body: JSON.stringify(data) }),
-  updateSession: (id: number, data: Partial<CourseSession>) =>
-    request<CourseSession>(`/teacher/sessions/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteSession: (id: number) =>
-    request(`/teacher/sessions/${id}`, { method: "DELETE" }),
-  updatePerformance: (id: number, feedback: string) =>
-    request<StudentPerformance>(`/teacher/performances/${id}`, {
+  createLesson: (
+    token: string,
+    data: Partial<LessonRecord> & { class_id: number; lesson_date: string; performances: { student_id: number; feedback?: string }[] }
+  ) => request<LessonRecord>("/teacher/lessons", { method: "POST", body: JSON.stringify(data) }, token),
+  updateLesson: (token: string, id: number, data: Partial<LessonRecord>) =>
+    request<LessonRecord>(`/teacher/lessons/${id}`, { method: "PUT", body: JSON.stringify(data) }, token),
+  deleteLesson: (token: string, id: number) =>
+    request(`/teacher/lessons/${id}`, { method: "DELETE" }, token),
+  updatePerformance: (token: string, id: number, feedback: string) =>
+    request<LessonPerformance>(`/teacher/performances/${id}`, {
       method: "PUT",
       body: JSON.stringify({ feedback }),
-    }),
+    }, token),
 
   // 考试记录
-  getExams: (params?: { student_id?: number; subject?: string; week?: string }) => {
+  getExams: (token: string, params?: { class_id?: number; student_id?: number; subject?: string }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
-    return request<ExamRecord[]>(`/teacher/exams${q ? `?${q}` : ""}`);
+    return request<ExamRecord[]>(`/teacher/exams${q ? `?${q}` : ""}`, {}, token);
   },
-  createExam: (data: Partial<ExamRecord>) =>
-    request<ExamRecord>("/teacher/exams", { method: "POST", body: JSON.stringify(data) }),
-  updateExam: (id: number, data: Partial<ExamRecord>) =>
-    request<ExamRecord>(`/teacher/exams/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteExam: (id: number) =>
-    request(`/teacher/exams/${id}`, { method: "DELETE" }),
+  createExam: (token: string, data: Partial<ExamRecord>) =>
+    request<ExamRecord>("/teacher/exams", { method: "POST", body: JSON.stringify(data) }, token),
+  updateExam: (token: string, id: number, data: Partial<ExamRecord>) =>
+    request<ExamRecord>(`/teacher/exams/${id}`, { method: "PUT", body: JSON.stringify(data) }, token),
+  deleteExam: (token: string, id: number) =>
+    request(`/teacher/exams/${id}`, { method: "DELETE" }, token),
 
   // 作业记录
-  getHomework: (params?: { week?: string; subject?: string; record_type?: string }) => {
+  getHomework: (token: string, params?: { class_id?: number; subject?: string }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
-    return request<HomeworkAssignment[]>(`/teacher/homework${q ? `?${q}` : ""}`);
+    return request<HomeworkAssignment[]>(`/teacher/homework${q ? `?${q}` : ""}`, {}, token);
   },
-  createHomework: (data: Partial<HomeworkAssignment> & { completions: { student_id: number; completion_status: string }[] }) =>
-    request<HomeworkAssignment>("/teacher/homework", { method: "POST", body: JSON.stringify(data) }),
-  updateHomework: (id: number, data: Partial<HomeworkAssignment>) =>
-    request<HomeworkAssignment>(`/teacher/homework/${id}`, { method: "PUT", body: JSON.stringify(data) }),
-  deleteHomework: (id: number) =>
-    request(`/teacher/homework/${id}`, { method: "DELETE" }),
-  updateCompletion: (id: number, status: string) =>
+  createHomework: (
+    token: string,
+    data: { class_id: number; date: string; subject: string; homework?: string; completions: { student_id: number; completion_status: string }[] }
+  ) => request<HomeworkAssignment>("/teacher/homework", { method: "POST", body: JSON.stringify(data) }, token),
+  updateHomework: (token: string, id: number, data: Partial<HomeworkAssignment>) =>
+    request<HomeworkAssignment>(`/teacher/homework/${id}`, { method: "PUT", body: JSON.stringify(data) }, token),
+  deleteHomework: (token: string, id: number) =>
+    request(`/teacher/homework/${id}`, { method: "DELETE" }, token),
+  updateCompletion: (token: string, id: number, status: string) =>
     request<HomeworkCompletion>(`/teacher/completions/${id}`, {
       method: "PUT",
       body: JSON.stringify({ completion_status: status }),
-    }),
+    }, token),
 };
 
-// ── 家长端 API ─────────────────────────────────────────────
+// ── 家长/学生端 API ─────────────────────────────────────────
 
 export const authApi = {
   login: (student_id: string) =>
@@ -175,15 +234,15 @@ export const authApi = {
 
 export const parentApi = {
   getMe: (token: string) => request<Student>("/parent/me", {}, token),
-  getPerformance: (token: string, params?: { week?: string; subject?: string }) => {
+  getPerformance: (token: string, params?: { subject?: string }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
-    return request<CourseSession[]>(`/parent/performance${q ? `?${q}` : ""}`, {}, token);
+    return request<LessonRecord[]>(`/parent/performance${q ? `?${q}` : ""}`, {}, token);
   },
-  getExams: (token: string, params?: { subject?: string; week?: string }) => {
+  getExams: (token: string, params?: { subject?: string }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
     return request<ExamRecord[]>(`/parent/exams${q ? `?${q}` : ""}`, {}, token);
   },
-  getHomework: (token: string, params?: { week?: string; subject?: string }) => {
+  getHomework: (token: string, params?: { subject?: string }) => {
     const q = new URLSearchParams(params as Record<string, string>).toString();
     return request<HomeworkAssignment[]>(`/parent/homework${q ? `?${q}` : ""}`, {}, token);
   },

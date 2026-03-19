@@ -23,8 +23,8 @@ from api.chat import router as chat_router
 
 app = FastAPI(
     title="学生反馈系统",
-    description="面向家长的学生情况查询与 AI 对话系统",
-    version="2.0.0",
+    description="为培训机构提供的一体化学习数据管理和智能查询平台",
+    version="3.0.0",
 )
 
 app.add_middleware(

@@ -1,25 +1,28 @@
 """
-教师端 API
-学生管理 + 课程记录录入 + 考试记录录入 + 作业记录录入
-所有写操作均在此模块，不需要身份验证（MVP阶段，后续可加教师Auth）
+教师端 API v3
+所有接口均需要 JWT 教师身份验证
+功能：班级管理 / 学生管理 / 课程记录 / 考试记录 / 作业记录
 """
 
 import random
 import string
 from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Student, CourseSession, StudentPerformance, ExamRecord, HomeworkAssignment, HomeworkCompletion
+from models import Teacher, Class, Student, LessonRecord, LessonPerformance, ExamRecord, HomeworkAssignment, HomeworkCompletion
 from schemas import (
+    ClassCreate, ClassUpdate, ClassResponse,
     StudentCreate, StudentUpdate, StudentResponse,
-    CourseSessionCreate, CourseSessionUpdate, CourseSessionResponse,
-    StudentPerformanceUpdate, StudentPerformanceResponse,
+    LessonRecordCreate, LessonRecordUpdate, LessonRecordResponse,
+    LessonPerformanceUpdate, LessonPerformanceResponse,
     ExamRecordCreate, ExamRecordUpdate, ExamRecordResponse,
     HomeworkAssignmentCreate, HomeworkAssignmentUpdate, HomeworkAssignmentResponse,
     HomeworkCompletionUpdate, HomeworkCompletionResponse,
 )
+from api.deps import get_current_teacher
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
 
@@ -27,27 +30,148 @@ router = APIRouter(prefix="/teacher", tags=["teacher"])
 # ── 工具函数 ──────────────────────────────────
 
 def _generate_student_id(db: Session) -> str:
-    """生成唯一8位数字学号"""
+    """生成唯一 8 位数字学号"""
     while True:
-        sid = ''.join(random.choices(string.digits, k=8))
+        sid = "".join(random.choices(string.digits, k=8))
         if not db.query(Student).filter(Student.student_id == sid).first():
             return sid
+
+
+def _build_class_response(c: Class) -> ClassResponse:
+    """构建包含计算字段的班级响应"""
+    completed = sum(1 for lr in c.lesson_records if lr.status == "completed")
+    remaining = max(0, c.total_lessons - completed)
+    return ClassResponse(
+        id               = c.id,
+        name             = c.name,
+        subject          = c.subject,
+        teacher_id       = c.teacher_id,
+        start_date       = c.start_date,
+        end_date         = c.end_date,
+        total_lessons    = c.total_lessons,
+        status           = c.status,
+        completed_lessons= completed,
+        remaining_lessons= remaining,
+        student_count    = len(c.students),
+        created_at       = c.created_at,
+    )
+
+
+def _assert_class_owner(class_id: int, teacher_id: int, db: Session) -> Class:
+    """验证班级属于当前教师，不存在或无权则抛 404"""
+    c = db.query(Class).filter(Class.id == class_id, Class.teacher_id == teacher_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="班级不存在或无权操作")
+    return c
+
+
+def _assert_student_owner(student_id: int, teacher_id: int, db: Session) -> Student:
+    """验证学生属于当前教师名下班级"""
+    s = (db.query(Student)
+         .join(Class, Student.class_id == Class.id)
+         .filter(Student.id == student_id, Class.teacher_id == teacher_id)
+         .first())
+    if not s:
+        raise HTTPException(status_code=404, detail="学生不存在或无权操作")
+    return s
+
+
+# ── 班级管理 ──────────────────────────────────
+
+@router.get("/classes", response_model=List[ClassResponse])
+def list_classes(
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    classes = db.query(Class).filter(Class.teacher_id == current_teacher.id).all()
+    return [_build_class_response(c) for c in classes]
+
+
+@router.post("/classes", response_model=ClassResponse)
+def create_class(
+    body: ClassCreate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    c = Class(
+        name          = body.name,
+        subject       = body.subject,
+        teacher_id    = current_teacher.id,
+        start_date    = body.start_date,
+        end_date      = body.end_date,
+        total_lessons = body.total_lessons,
+    )
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return _build_class_response(c)
+
+
+@router.get("/classes/{class_id}", response_model=ClassResponse)
+def get_class(
+    class_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    return _build_class_response(_assert_class_owner(class_id, current_teacher.id, db))
+
+
+@router.put("/classes/{class_id}", response_model=ClassResponse)
+def update_class(
+    class_id: int,
+    body: ClassUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    c = _assert_class_owner(class_id, current_teacher.id, db)
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(c, field, value)
+    db.commit()
+    db.refresh(c)
+    return _build_class_response(c)
+
+
+@router.delete("/classes/{class_id}")
+def delete_class(
+    class_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    c = _assert_class_owner(class_id, current_teacher.id, db)
+    db.delete(c)
+    db.commit()
+    return {"success": True}
 
 
 # ── 学生管理 ──────────────────────────────────
 
 @router.get("/students", response_model=List[StudentResponse])
-def list_students(db: Session = Depends(get_db)):
-    return db.query(Student).order_by(Student.chinese_name).all()
+def list_students(
+    class_id: Optional[int] = None,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """获取当前教师名下的学生，可按班级筛选"""
+    q = (db.query(Student)
+         .join(Class, Student.class_id == Class.id)
+         .filter(Class.teacher_id == current_teacher.id))
+    if class_id:
+        q = q.filter(Student.class_id == class_id)
+    return q.order_by(Student.chinese_name).all()
 
 
 @router.post("/students", response_model=StudentResponse)
-def create_student(body: StudentCreate, db: Session = Depends(get_db)):
-    """新建学生，自动生成8位学号"""
+def create_student(
+    body: StudentCreate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    _assert_class_owner(body.class_id, current_teacher.id, db)
     student = Student(
-        student_id=_generate_student_id(db),
-        chinese_name=body.chinese_name,
-        english_name=body.english_name,
+        student_id   = _generate_student_id(db),
+        chinese_name = body.chinese_name,
+        english_name = body.english_name,
+        class_id     = body.class_id,
     )
     db.add(student)
     db.commit()
@@ -56,113 +180,136 @@ def create_student(body: StudentCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/students/{student_id}", response_model=StudentResponse)
-def get_student(student_id: int, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="学生不存在")
-    return student
+def get_student(
+    student_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    return _assert_student_owner(student_id, current_teacher.id, db)
 
 
 @router.put("/students/{student_id}", response_model=StudentResponse)
-def update_student(student_id: int, body: StudentUpdate, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="学生不存在")
-    if body.chinese_name is not None:
-        student.chinese_name = body.chinese_name
-    if body.english_name is not None:
-        student.english_name = body.english_name
+def update_student(
+    student_id: int,
+    body: StudentUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    student = _assert_student_owner(student_id, current_teacher.id, db)
+    if body.class_id is not None:
+        _assert_class_owner(body.class_id, current_teacher.id, db)
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(student, field, value)
     db.commit()
     db.refresh(student)
     return student
 
 
 @router.delete("/students/{student_id}")
-def delete_student(student_id: int, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="学生不存在")
+def delete_student(
+    student_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    student = _assert_student_owner(student_id, current_teacher.id, db)
     db.delete(student)
     db.commit()
     return {"success": True}
 
 
-# ── 课程记录 ──────────────────────────────────
+# ── 课程记录（单节课） ─────────────────────────
 
-@router.get("/sessions", response_model=List[CourseSessionResponse])
-def list_sessions(
-    week: Optional[str] = None,
-    subject: Optional[str] = None,
-    record_type: Optional[str] = None,
+@router.get("/lessons", response_model=List[LessonRecordResponse])
+def list_lessons(
+    class_id: Optional[int] = None,
+    current_teacher: Teacher = Depends(get_current_teacher),
     db: Session = Depends(get_db),
 ):
-    q = db.query(CourseSession)
-    if week:
-        q = q.filter(CourseSession.week == week)
-    if subject:
-        q = q.filter(CourseSession.subject == subject)
-    if record_type:
-        q = q.filter(CourseSession.record_type == record_type)
-    return q.order_by(CourseSession.date.desc().nullslast(), CourseSession.week.desc()).all()
+    q = (db.query(LessonRecord)
+         .join(Class, LessonRecord.class_id == Class.id)
+         .filter(Class.teacher_id == current_teacher.id))
+    if class_id:
+        q = q.filter(LessonRecord.class_id == class_id)
+    return q.order_by(LessonRecord.lesson_date.desc()).all()
 
 
-@router.post("/sessions", response_model=CourseSessionResponse)
-def create_session(body: CourseSessionCreate, db: Session = Depends(get_db)):
-    """
-    创建课程单元，同时批量创建各学生的表现记录
-    适合 Airtable 风格的一次性录入：教师填完一行课程信息 + 每列学生反馈后提交
-    """
-    session = CourseSession(
-        record_type=body.record_type,
-        date=body.date,
-        day_of_week=body.day_of_week,
-        week=body.week,
-        subject=body.subject,
-        teacher_name=body.teacher_name,
-        course_content=body.course_content,
+@router.post("/lessons", response_model=LessonRecordResponse)
+def create_lesson(
+    body: LessonRecordCreate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    _assert_class_owner(body.class_id, current_teacher.id, db)
+    lesson = LessonRecord(
+        class_id          = body.class_id,
+        lesson_date       = body.lesson_date,
+        lesson_start_time = body.lesson_start_time,
+        lesson_end_time   = body.lesson_end_time,
+        topic             = body.topic,
+        content_notes     = body.content_notes,
+        status            = body.status,
     )
-    db.add(session)
-    db.flush()  # 获取 session.id
+    db.add(lesson)
+    db.flush()
 
     for p in body.performances:
-        db.add(StudentPerformance(
-            course_session_id=session.id,
-            student_id=p.student_id,
-            feedback=p.feedback,
+        db.add(LessonPerformance(
+            lesson_record_id = lesson.id,
+            student_id       = p.student_id,
+            feedback         = p.feedback,
         ))
 
     db.commit()
-    db.refresh(session)
-    return session
+    db.refresh(lesson)
+    return lesson
 
 
-@router.put("/sessions/{session_id}", response_model=CourseSessionResponse)
-def update_session(session_id: int, body: CourseSessionUpdate, db: Session = Depends(get_db)):
-    """更新课程单元的基本信息（不含各学生反馈，反馈通过 /performances/{id} 单独更新）"""
-    session = db.query(CourseSession).filter(CourseSession.id == session_id).first()
-    if not session:
+@router.put("/lessons/{lesson_id}", response_model=LessonRecordResponse)
+def update_lesson(
+    lesson_id: int,
+    body: LessonRecordUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    lesson = (db.query(LessonRecord)
+              .join(Class, LessonRecord.class_id == Class.id)
+              .filter(LessonRecord.id == lesson_id, Class.teacher_id == current_teacher.id)
+              .first())
+    if not lesson:
         raise HTTPException(status_code=404, detail="课程记录不存在")
     for field, value in body.model_dump(exclude_none=True).items():
-        setattr(session, field, value)
+        setattr(lesson, field, value)
     db.commit()
-    db.refresh(session)
-    return session
+    db.refresh(lesson)
+    return lesson
 
 
-@router.delete("/sessions/{session_id}")
-def delete_session(session_id: int, db: Session = Depends(get_db)):
-    session = db.query(CourseSession).filter(CourseSession.id == session_id).first()
-    if not session:
+@router.delete("/lessons/{lesson_id}")
+def delete_lesson(
+    lesson_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    lesson = (db.query(LessonRecord)
+              .join(Class, LessonRecord.class_id == Class.id)
+              .filter(LessonRecord.id == lesson_id, Class.teacher_id == current_teacher.id)
+              .first())
+    if not lesson:
         raise HTTPException(status_code=404, detail="课程记录不存在")
-    db.delete(session)
+    db.delete(lesson)
     db.commit()
     return {"success": True}
 
 
-@router.put("/performances/{performance_id}", response_model=StudentPerformanceResponse)
-def update_performance(performance_id: int, body: StudentPerformanceUpdate, db: Session = Depends(get_db)):
-    """更新单个学生在某节课的反馈（对应 Airtable 中单元格编辑）"""
-    perf = db.query(StudentPerformance).filter(StudentPerformance.id == performance_id).first()
+@router.put("/performances/{performance_id}", response_model=LessonPerformanceResponse)
+def update_performance(
+    performance_id: int,
+    body: LessonPerformanceUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """更新单个学生在某节课的反馈（单元格行内编辑，失焦自动保存）"""
+    perf = db.query(LessonPerformance).filter(LessonPerformance.id == performance_id).first()
     if not perf:
         raise HTTPException(status_code=404, detail="表现记录不存在")
     perf.feedback = body.feedback
@@ -175,23 +322,32 @@ def update_performance(performance_id: int, body: StudentPerformanceUpdate, db: 
 
 @router.get("/exams", response_model=List[ExamRecordResponse])
 def list_exams(
+    class_id: Optional[int] = None,
     student_id: Optional[int] = None,
     subject: Optional[str] = None,
-    week: Optional[str] = None,
+    current_teacher: Teacher = Depends(get_current_teacher),
     db: Session = Depends(get_db),
 ):
-    q = db.query(ExamRecord)
+    q = (db.query(ExamRecord)
+         .join(Student, ExamRecord.student_id == Student.id)
+         .join(Class, Student.class_id == Class.id)
+         .filter(Class.teacher_id == current_teacher.id))
+    if class_id:
+        q = q.filter(Student.class_id == class_id)
     if student_id:
         q = q.filter(ExamRecord.student_id == student_id)
     if subject:
         q = q.filter(ExamRecord.subject == subject)
-    if week:
-        q = q.filter(ExamRecord.week == week)
     return q.order_by(ExamRecord.test_date.desc().nullslast()).all()
 
 
 @router.post("/exams", response_model=ExamRecordResponse)
-def create_exam(body: ExamRecordCreate, db: Session = Depends(get_db)):
+def create_exam(
+    body: ExamRecordCreate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    _assert_student_owner(body.student_id, current_teacher.id, db)
     record = ExamRecord(**body.model_dump())
     db.add(record)
     db.commit()
@@ -200,8 +356,17 @@ def create_exam(body: ExamRecordCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/exams/{exam_id}", response_model=ExamRecordResponse)
-def update_exam(exam_id: int, body: ExamRecordUpdate, db: Session = Depends(get_db)):
-    record = db.query(ExamRecord).filter(ExamRecord.id == exam_id).first()
+def update_exam(
+    exam_id: int,
+    body: ExamRecordUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    record = (db.query(ExamRecord)
+              .join(Student, ExamRecord.student_id == Student.id)
+              .join(Class, Student.class_id == Class.id)
+              .filter(ExamRecord.id == exam_id, Class.teacher_id == current_teacher.id)
+              .first())
     if not record:
         raise HTTPException(status_code=404, detail="考试记录不存在")
     for field, value in body.model_dump(exclude_none=True).items():
@@ -212,8 +377,16 @@ def update_exam(exam_id: int, body: ExamRecordUpdate, db: Session = Depends(get_
 
 
 @router.delete("/exams/{exam_id}")
-def delete_exam(exam_id: int, db: Session = Depends(get_db)):
-    record = db.query(ExamRecord).filter(ExamRecord.id == exam_id).first()
+def delete_exam(
+    exam_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    record = (db.query(ExamRecord)
+              .join(Student, ExamRecord.student_id == Student.id)
+              .join(Class, Student.class_id == Class.id)
+              .filter(ExamRecord.id == exam_id, Class.teacher_id == current_teacher.id)
+              .first())
     if not record:
         raise HTTPException(status_code=404, detail="考试记录不存在")
     db.delete(record)
@@ -225,42 +398,42 @@ def delete_exam(exam_id: int, db: Session = Depends(get_db)):
 
 @router.get("/homework", response_model=List[HomeworkAssignmentResponse])
 def list_homework(
-    week: Optional[str] = None,
+    class_id: Optional[int] = None,
     subject: Optional[str] = None,
-    record_type: Optional[str] = None,
+    current_teacher: Teacher = Depends(get_current_teacher),
     db: Session = Depends(get_db),
 ):
-    q = db.query(HomeworkAssignment)
-    if week:
-        q = q.filter(HomeworkAssignment.week == week)
+    q = (db.query(HomeworkAssignment)
+         .join(Class, HomeworkAssignment.class_id == Class.id)
+         .filter(Class.teacher_id == current_teacher.id))
+    if class_id:
+        q = q.filter(HomeworkAssignment.class_id == class_id)
     if subject:
         q = q.filter(HomeworkAssignment.subject == subject)
-    if record_type:
-        q = q.filter(HomeworkAssignment.record_type == record_type)
-    return q.order_by(HomeworkAssignment.date.desc().nullslast(), HomeworkAssignment.week.desc()).all()
+    return q.order_by(HomeworkAssignment.date.desc()).all()
 
 
 @router.post("/homework", response_model=HomeworkAssignmentResponse)
-def create_homework(body: HomeworkAssignmentCreate, db: Session = Depends(get_db)):
-    """
-    创建作业布置，同时批量创建各学生的完成情况记录
-    """
+def create_homework(
+    body: HomeworkAssignmentCreate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    _assert_class_owner(body.class_id, current_teacher.id, db)
     assignment = HomeworkAssignment(
-        record_type=body.record_type,
-        date=body.date,
-        day_of_week=body.day_of_week,
-        week=body.week,
-        subject=body.subject,
-        homework=body.homework,
+        class_id = body.class_id,
+        date     = body.date,
+        subject  = body.subject,
+        homework = body.homework,
     )
     db.add(assignment)
     db.flush()
 
     for c in body.completions:
         db.add(HomeworkCompletion(
-            homework_assignment_id=assignment.id,
-            student_id=c.student_id,
-            completion_status=c.completion_status,
+            homework_assignment_id = assignment.id,
+            student_id             = c.student_id,
+            completion_status      = c.completion_status,
         ))
 
     db.commit()
@@ -269,8 +442,16 @@ def create_homework(body: HomeworkAssignmentCreate, db: Session = Depends(get_db
 
 
 @router.put("/homework/{assignment_id}", response_model=HomeworkAssignmentResponse)
-def update_homework(assignment_id: int, body: HomeworkAssignmentUpdate, db: Session = Depends(get_db)):
-    assignment = db.query(HomeworkAssignment).filter(HomeworkAssignment.id == assignment_id).first()
+def update_homework(
+    assignment_id: int,
+    body: HomeworkAssignmentUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    assignment = (db.query(HomeworkAssignment)
+                  .join(Class, HomeworkAssignment.class_id == Class.id)
+                  .filter(HomeworkAssignment.id == assignment_id, Class.teacher_id == current_teacher.id)
+                  .first())
     if not assignment:
         raise HTTPException(status_code=404, detail="作业记录不存在")
     for field, value in body.model_dump(exclude_none=True).items():
@@ -281,8 +462,15 @@ def update_homework(assignment_id: int, body: HomeworkAssignmentUpdate, db: Sess
 
 
 @router.delete("/homework/{assignment_id}")
-def delete_homework(assignment_id: int, db: Session = Depends(get_db)):
-    assignment = db.query(HomeworkAssignment).filter(HomeworkAssignment.id == assignment_id).first()
+def delete_homework(
+    assignment_id: int,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    assignment = (db.query(HomeworkAssignment)
+                  .join(Class, HomeworkAssignment.class_id == Class.id)
+                  .filter(HomeworkAssignment.id == assignment_id, Class.teacher_id == current_teacher.id)
+                  .first())
     if not assignment:
         raise HTTPException(status_code=404, detail="作业记录不存在")
     db.delete(assignment)
@@ -291,8 +479,13 @@ def delete_homework(assignment_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/completions/{completion_id}", response_model=HomeworkCompletionResponse)
-def update_completion(completion_id: int, body: HomeworkCompletionUpdate, db: Session = Depends(get_db)):
-    """更新单个学生的作业完成情况（对应 Airtable 中单元格编辑）"""
+def update_completion(
+    completion_id: int,
+    body: HomeworkCompletionUpdate,
+    current_teacher: Teacher = Depends(get_current_teacher),
+    db: Session = Depends(get_db),
+):
+    """更新单个学生的作业完成情况（单元格点击切换）"""
     completion = db.query(HomeworkCompletion).filter(HomeworkCompletion.id == completion_id).first()
     if not completion:
         raise HTTPException(status_code=404, detail="完成记录不存在")

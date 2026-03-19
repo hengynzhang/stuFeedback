@@ -1,54 +1,74 @@
 "use client";
 import { useEffect, useState } from "react";
-import { teacherApi, ExamRecord, Student } from "@/lib/api";
+import { teacherApi, ExamRecord, Student, Class } from "@/lib/api";
 import { Plus, Trash2, Pencil, Check, X } from "lucide-react";
 
-const SUBJECTS = ["听力", "阅读", "写作", "口语", "数学"];
-const DAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const SUBJECTS = ["听力", "阅读", "写作", "口语", "数学", "语文", "物理", "化学", "其他"];
 
-type FormState = Omit<ExamRecord, "id" | "created_at">;
-
-const EMPTY_FORM: FormState = {
-  student_id: 0, test_date: "", day_of_week: "", week: "",
-  test_number: undefined, subject: "", score: undefined, total: undefined, notes: "",
+type FormState = {
+  student_id: number;
+  test_date: string;
+  test_number?: number;
+  subject: string;
+  score?: number;
+  total?: number;
+  notes: string;
 };
 
+const EMPTY_FORM: FormState = {
+  student_id: 0, test_date: "", test_number: undefined,
+  subject: "", score: undefined, total: undefined, notes: "",
+};
+
+function getToken() {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("teacher_token") ?? "";
+}
+
 export default function ExamsPage() {
-  const [exams, setExams] = useState<ExamRecord[]>([]);
+  const [exams, setExams]       = useState<ExamRecord[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [classes, setClasses]   = useState<Class[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [form, setForm]         = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState<Partial<ExamRecord>>({});
+  const [editForm, setEditForm]   = useState<Partial<ExamRecord>>({});
   const [filterStudent, setFilterStudent] = useState("");
+  const [filterClass,   setFilterClass]   = useState("");
   const [filterSubject, setFilterSubject] = useState("");
 
   useEffect(() => {
     Promise.all([
-      teacherApi.getExams().then(setExams),
-      teacherApi.getStudents().then(setStudents),
+      teacherApi.getExams(getToken()).then(setExams),
+      teacherApi.getStudents(getToken()).then(setStudents),
+      teacherApi.getClasses(getToken()).then(setClasses),
     ]).finally(() => setLoading(false));
   }, []);
 
-  const filtered = exams.filter((e) =>
-    (!filterStudent || e.student_id === Number(filterStudent)) &&
-    (!filterSubject || e.subject === filterSubject)
-  );
+  const filtered = exams.filter((e) => {
+    const stu = students.find((s) => s.id === e.student_id);
+    return (
+      (!filterStudent || e.student_id === Number(filterStudent)) &&
+      (!filterClass   || stu?.class_id === Number(filterClass)) &&
+      (!filterSubject || e.subject === filterSubject)
+    );
+  });
 
   function studentName(id: number) {
     return students.find((s) => s.id === id)?.chinese_name ?? `#${id}`;
+  }
+  function classStudents(classId: number) {
+    return students.filter((s) => s.class_id === classId);
   }
 
   async function handleCreate() {
     if (!form.student_id || !form.subject) return alert("请选择学生和科目");
     try {
-      const created = await teacherApi.createExam({
+      const created = await teacherApi.createExam(getToken(), {
         ...form,
         test_date: form.test_date || undefined,
-        day_of_week: form.day_of_week || undefined,
-        week: form.week || undefined,
-        notes: form.notes || undefined,
+        notes:     form.notes     || undefined,
       });
       setExams((prev) => [created, ...prev]);
       setForm(EMPTY_FORM); setShowForm(false);
@@ -57,7 +77,7 @@ export default function ExamsPage() {
 
   async function handleSave(id: number) {
     try {
-      const updated = await teacherApi.updateExam(id, editForm);
+      const updated = await teacherApi.updateExam(getToken(), id, editForm);
       setExams((prev) => prev.map((e) => (e.id === id ? updated : e)));
       setEditingId(null);
     } catch (e: unknown) { alert(e instanceof Error ? e.message : "更新失败"); }
@@ -65,7 +85,7 @@ export default function ExamsPage() {
 
   async function handleDelete(id: number) {
     if (!confirm("确认删除？")) return;
-    await teacherApi.deleteExam(id);
+    await teacherApi.deleteExam(getToken(), id);
     setExams((prev) => prev.filter((e) => e.id !== id));
   }
 
@@ -83,10 +103,16 @@ export default function ExamsPage() {
 
       {/* 筛选 */}
       <div className="flex gap-3 mb-4">
+        <select value={filterClass} onChange={(e) => { setFilterClass(e.target.value); setFilterStudent(""); }}
+          className="border rounded-lg px-3 py-1.5 text-sm">
+          <option value="">全部班级</option>
+          {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
         <select value={filterStudent} onChange={(e) => setFilterStudent(e.target.value)}
           className="border rounded-lg px-3 py-1.5 text-sm">
           <option value="">全部学生</option>
-          {students.map((s) => <option key={s.id} value={s.id}>{s.chinese_name}</option>)}
+          {(filterClass ? classStudents(Number(filterClass)) : students)
+            .map((s) => <option key={s.id} value={s.id}>{s.chinese_name}</option>)}
         </select>
         <select value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)}
           className="border rounded-lg px-3 py-1.5 text-sm">
@@ -122,36 +148,26 @@ export default function ExamsPage() {
                 className="border rounded px-2 py-1.5 text-sm w-full" />
             </div>
             <div>
-              <label className="text-xs text-gray-500 mb-1 block">星期</label>
-              <select value={form.day_of_week} onChange={(e) => setForm({ ...form, day_of_week: e.target.value })}
-                className="border rounded px-2 py-1.5 text-sm w-full">
-                <option value="">请选择</option>
-                {DAYS.map((d) => <option key={d}>{d}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-500 mb-1 block">周次</label>
-              <input value={form.week} onChange={(e) => setForm({ ...form, week: e.target.value })}
-                placeholder="如 Week 1" className="border rounded px-2 py-1.5 text-sm w-full" />
-            </div>
-            <div>
               <label className="text-xs text-gray-500 mb-1 block">第几次考试</label>
-              <input type="number" value={form.test_number ?? ""} onChange={(e) => setForm({ ...form, test_number: Number(e.target.value) || undefined })}
+              <input type="number" value={form.test_number ?? ""}
+                onChange={(e) => setForm({ ...form, test_number: Number(e.target.value) || undefined })}
                 className="border rounded px-2 py-1.5 text-sm w-full" />
             </div>
             <div>
               <label className="text-xs text-gray-500 mb-1 block">得分</label>
-              <input type="number" step="0.5" value={form.score ?? ""} onChange={(e) => setForm({ ...form, score: Number(e.target.value) || undefined })}
+              <input type="number" step="0.5" value={form.score ?? ""}
+                onChange={(e) => setForm({ ...form, score: Number(e.target.value) || undefined })}
                 className="border rounded px-2 py-1.5 text-sm w-full" />
             </div>
             <div>
               <label className="text-xs text-gray-500 mb-1 block">满分</label>
-              <input type="number" value={form.total ?? ""} onChange={(e) => setForm({ ...form, total: Number(e.target.value) || undefined })}
+              <input type="number" value={form.total ?? ""}
+                onChange={(e) => setForm({ ...form, total: Number(e.target.value) || undefined })}
                 className="border rounded px-2 py-1.5 text-sm w-full" />
             </div>
-            <div>
+            <div className="col-span-3">
               <label className="text-xs text-gray-500 mb-1 block">备注</label>
-              <input value={form.notes ?? ""} onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              <input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })}
                 className="border rounded px-2 py-1.5 text-sm w-full" />
             </div>
           </div>
@@ -167,8 +183,8 @@ export default function ExamsPage() {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b">
             <tr>
-              {["学生", "科目", "日期", "周次", "得分", "满分", "备注", ""].map((h) => (
-                <th key={h} className="text-left px-4 py-2 font-medium text-gray-500">{h}</th>
+              {["学生", "科目", "日期", "第几次", "得分", "满分", "备注", ""].map((h) => (
+                <th key={h} className="text-left px-4 py-2.5 font-medium text-gray-500">{h}</th>
               ))}
             </tr>
           </thead>
@@ -179,29 +195,35 @@ export default function ExamsPage() {
                   <>
                     <td className="px-4 py-2">{studentName(e.student_id)}</td>
                     <td className="px-4 py-2">
-                      <select value={editForm.subject ?? e.subject} onChange={(ev) => setEditForm({ ...editForm, subject: ev.target.value })}
+                      <select value={editForm.subject ?? e.subject}
+                        onChange={(ev) => setEditForm({ ...editForm, subject: ev.target.value })}
                         className="border rounded px-2 py-1 text-sm">
                         {SUBJECTS.map((s) => <option key={s}>{s}</option>)}
                       </select>
                     </td>
                     <td className="px-4 py-2">
-                      <input type="date" value={editForm.test_date ?? e.test_date ?? ""} onChange={(ev) => setEditForm({ ...editForm, test_date: ev.target.value })}
+                      <input type="date" value={editForm.test_date ?? e.test_date ?? ""}
+                        onChange={(ev) => setEditForm({ ...editForm, test_date: ev.target.value })}
                         className="border rounded px-2 py-1 text-sm" />
                     </td>
                     <td className="px-4 py-2">
-                      <input value={editForm.week ?? e.week ?? ""} onChange={(ev) => setEditForm({ ...editForm, week: ev.target.value })}
-                        className="border rounded px-2 py-1 text-sm w-20" />
-                    </td>
-                    <td className="px-4 py-2">
-                      <input type="number" step="0.5" value={editForm.score ?? e.score ?? ""} onChange={(ev) => setEditForm({ ...editForm, score: Number(ev.target.value) })}
+                      <input type="number" value={editForm.test_number ?? e.test_number ?? ""}
+                        onChange={(ev) => setEditForm({ ...editForm, test_number: Number(ev.target.value) })}
                         className="border rounded px-2 py-1 text-sm w-16" />
                     </td>
                     <td className="px-4 py-2">
-                      <input type="number" value={editForm.total ?? e.total ?? ""} onChange={(ev) => setEditForm({ ...editForm, total: Number(ev.target.value) })}
+                      <input type="number" step="0.5" value={editForm.score ?? e.score ?? ""}
+                        onChange={(ev) => setEditForm({ ...editForm, score: Number(ev.target.value) })}
                         className="border rounded px-2 py-1 text-sm w-16" />
                     </td>
                     <td className="px-4 py-2">
-                      <input value={editForm.notes ?? e.notes ?? ""} onChange={(ev) => setEditForm({ ...editForm, notes: ev.target.value })}
+                      <input type="number" value={editForm.total ?? e.total ?? ""}
+                        onChange={(ev) => setEditForm({ ...editForm, total: Number(ev.target.value) })}
+                        className="border rounded px-2 py-1 text-sm w-16" />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input value={editForm.notes ?? e.notes ?? ""}
+                        onChange={(ev) => setEditForm({ ...editForm, notes: ev.target.value })}
                         className="border rounded px-2 py-1 text-sm w-32" />
                     </td>
                     <td className="px-4 py-2">
@@ -216,7 +238,7 @@ export default function ExamsPage() {
                     <td className="px-4 py-2">{studentName(e.student_id)}</td>
                     <td className="px-4 py-2">{e.subject}</td>
                     <td className="px-4 py-2 text-gray-500">{e.test_date ?? "—"}</td>
-                    <td className="px-4 py-2 text-gray-500">{e.week ?? "—"}</td>
+                    <td className="px-4 py-2 text-gray-500">{e.test_number ? `第 ${e.test_number} 次` : "—"}</td>
                     <td className="px-4 py-2 font-medium">{e.score ?? "—"}</td>
                     <td className="px-4 py-2 text-gray-500">{e.total ?? "—"}</td>
                     <td className="px-4 py-2 text-gray-500 max-w-xs truncate">{e.notes ?? "—"}</td>

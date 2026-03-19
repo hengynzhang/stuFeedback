@@ -20,10 +20,8 @@ from ai.memory import load_memory, extract_and_update_memory
 
 CHAT_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-client = AsyncOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-)
+_api_key = os.getenv("DEEPSEEK_API_KEY")
+client = AsyncOpenAI(api_key=_api_key, base_url="https://api.deepseek.com") if _api_key else None
 
 MAX_TOOL_ROUNDS = 5  # 最多连续调用工具的轮数，防止无限循环
 
@@ -82,6 +80,9 @@ class ChatAgent:
         ]
 
         # 4. Tool Calling 循环
+        if client is None:
+            return "AI 功能暂未配置，请联系管理员设置 DEEPSEEK_API_KEY。"
+
         for _ in range(MAX_TOOL_ROUNDS):
             response = await client.chat.completions.create(
                 model=CHAT_MODEL,
